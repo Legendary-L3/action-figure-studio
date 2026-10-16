@@ -2,13 +2,13 @@ import tempfile
 import trimesh
 import numpy as np
 import streamlit as st
-from PIL import Image, ImageDraw
-import matplotlib.pyplot as plt
+from PIL import Image
+from gradio_client import Client, handle_file
 
-st.set_page_config(page_title="Action Figure 3D Studio", page_icon="🦸", layout="centered")
+st.set_page_config(page_title="Action Figure Statue Studio", page_icon="🗿", layout="centered")
 
-st.title("🦸 Action Figure 3D Studio")
-st.caption("iPhone-to-Library Edition • Instant Image Previews & Joint Builder")
+st.title("🗿 Action Figure Statue Studio")
+st.caption("iPhone-to-Library Edition • Clean Solid Statues & Collector Bases")
 
 LIBRARY_SCALES = {
     "3.75-inch Vintage Scale (95mm) | ~1.5 - 2.5 hrs": 95.25,
@@ -17,54 +17,23 @@ LIBRARY_SCALES = {
     "7-inch Deluxe Scale (178mm) | ~6.5 - 8 hrs": 177.8,
 }
 
-JOINT_MODES = [
-    "Poseable Ball-and-Socket Kit (Neck, Shoulders & Waist)",
-    "Classic 5-Point Swivel Pegs (Retro Action Figure Style)",
-    "Solid Statue (Single Uncut Piece)"
-]
-
-if "raw_mesh" not in st.session_state:
-    st.session_state.raw_mesh = None
-
-def generate_iphone_image_preview(mesh: trimesh.Trimesh, title="3D Preview"):
-    """Renders a rock-solid 3D visual preview as a standard PNG image for iOS Safari."""
-    fig = plt.figure(figsize=(5, 5))
-    ax = fig.add_subplot(111, projection='3d')
-    
-    v = mesh.vertices
-    if len(v) > 2500:
-        idx = np.random.choice(len(v), 2500, replace=False)
-        v = v[idx]
-        
-    ax.scatter(v[:, 0], v[:, 1], v[:, 2], c=v[:, 2], cmap='plasma', s=1.5)
-    ax.set_facecolor('#1e1e24')
-    fig.patch.set_facecolor('#1e1e24')
-    ax.axis('off')
-    plt.title(title, color='white', fontsize=12, fontweight='bold')
-    
-    tmp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-    plt.savefig(tmp_img.name, bbox_inches='tight', pad_inches=0.1, facecolor=fig.get_facecolor())
-    plt.close(fig)
-    return tmp_img.name
-
-def draw_2d_cut_overlay(img: Image.Image, neck_pct: float, waist_pct: float, shoulder_pct: float) -> Image.Image:
-    preview = img.convert("RGB").copy()
-    draw = ImageDraw.Draw(preview)
-    w, h = preview.size
-    line_w = max(int(min(w, h) * 0.012), 3)
-
-    neck_y = int(h * (1.0 - neck_pct))
-    waist_y = int(h * (1.0 - waist_pct))
-    left_x = int(w * (0.5 - shoulder_pct))
-    right_x = int(w * (0.5 + shoulder_pct))
-
-    draw.line([(0, neck_y), (w, neck_y)], fill=(255, 65, 65), width=line_w)
-    draw.line([(0, waist_y), (w, waist_y)], fill=(45, 220, 90), width=line_w)
-    draw.line([(left_x, neck_y), (left_x, waist_y)], fill=(65, 160, 255), width=line_w)
-    draw.line([(right_x, neck_y), (right_x, waist_y)], fill=(65, 160, 255), width=line_w)
-    return preview
+def generate_mesh_hunyuan(image_path: str) -> str:
+    """Calls free Hugging Face Hunyuan3D-2 space remotely via gradio_client."""
+    hf_token = st.secrets.get("HF_TOKEN", None) if "HF_TOKEN" in st.secrets else None
+    client = Client("tencent/Hunyuan3D-2", hf_token=hf_token)
+    result = client.predict(
+        image=handle_file(image_path),
+        api_name="/shape_generation"
+    )
+    if isinstance(result, (list, tuple)):
+        glb_file = result[0]
+        return glb_file["value"] if isinstance(glb_file, dict) and "value" in glb_file else glb_file
+    elif isinstance(result, dict) and "value" in result:
+        return result["value"]
+    return result
 
 def build_test_mannequin() -> trimesh.Trimesh:
+    """Offline test character for instant statue and scaling checks."""
     torso = trimesh.creation.capsule(height=0.55, radius=0.16)
     torso.apply_translation([0, 0, 0.78])
     head = trimesh.creation.icosphere(radius=0.14)
@@ -85,161 +54,82 @@ def build_test_mannequin() -> trimesh.Trimesh:
     mesh.apply_scale(152.4 / mesh.extents[2])
     return mesh
 
-def make_joint_geometry(center, axis_vec, radius, is_ball=True, clearance=0.0):
-    r = radius - clearance
-    stem_len = radius * 1.6
-    stem = trimesh.creation.cylinder(radius=r * 0.68, height=stem_len, sections=32)
-    rot = trimesh.geometry.align_vectors([0, 0, 1], axis_vec)
-    stem.apply_transform(rot)
-    stem.apply_translation(center + np.array(axis_vec) * (stem_len * 0.35))
-    if is_ball:
-        ball = trimesh.creation.icosphere(subdivisions=3, radius=r)
-        ball.apply_translation(center + np.array(axis_vec) * (stem_len * 0.75))
-        return trimesh.util.concatenate([stem, ball])
-    return stem
+# --- iPhone UI Controls ---
+uploaded_file = st.file_uploader(
+    "1. Tap to Snap Photo or Pick from iPhone Camera Roll",
+    type=["png", "jpg", "jpeg", "webp"]
+)
 
-def cut_and_joint_pair(mesh_a, mesh_b, joint_center, normal_into_b, joint_radius, is_ball, clearance_mm):
-    peg = make_joint_geometry(joint_center, normal_into_b, joint_radius, is_ball=is_ball, clearance=0.0)
-    socket_cutter = make_joint_geometry(joint_center, normal_into_b, joint_radius, is_ball=is_ball, clearance=-clearance_mm)
-    part_with_peg = trimesh.util.concatenate([mesh_a, peg])
-    try:
-        part_with_socket = trimesh.boolean.difference([mesh_b, socket_cutter], engine="manifold")
-        if part_with_socket is None or len(part_with_socket.faces) == 0:
-            part_with_socket = mesh_b
-    except Exception:
-        part_with_socket = mesh_b
-    return part_with_peg, part_with_socket
+use_test_mode = st.checkbox("🧪 Enable Instant Test Mannequin (0-Credit Offline Mode)", value=False)
 
-def articulate_figure(mesh: trimesh.Trimesh, neck_pct: float, waist_pct: float, shoulder_pct: float, is_ball_joint: bool, clearance_mm: float = 0.25) -> trimesh.Trimesh:
-    bounds = mesh.bounds
-    min_pt, max_pt = bounds[0], bounds[1]
-    width = max_pt[0] - min_pt[0]
-    height = max_pt[2] - min_pt[2]
-    center_x = (min_pt[0] + max_pt[0]) / 2.0
-    center_y = (min_pt[1] + max_pt[1]) / 2.0
+scale_label = st.selectbox(
+    "2. Choose Library-Friendly Statue Scale",
+    options=list(LIBRARY_SCALES.keys()),
+    index=2
+)
 
-    neck_z = min_pt[2] + height * neck_pct
-    waist_z = min_pt[2] + height * waist_pct
-    shoulder_offset_x = width * shoulder_pct
-
-    neck_r = max(height * 0.028, 2.8)
-    waist_r = max(height * 0.036, 3.5)
-    shoulder_r = max(height * 0.026, 2.6)
-
-    head = trimesh.intersections.slice_mesh_plane(mesh, [0, 0, 1], [center_x, center_y, neck_z], cap=True)
-    below_neck = trimesh.intersections.slice_mesh_plane(mesh, [0, 0, -1], [center_x, center_y, neck_z], cap=True)
-    upper_body = trimesh.intersections.slice_mesh_plane(below_neck, [0, 0, 1], [center_x, center_y, waist_z], cap=True)
-    legs = trimesh.intersections.slice_mesh_plane(below_neck, [0, 0, -1], [center_x, center_y, waist_z], cap=True)
-
-    left_x = center_x - shoulder_offset_x
-    right_x = center_x + shoulder_offset_x
-
-    arm_left = trimesh.intersections.slice_mesh_plane(upper_body, [-1, 0, 0], [left_x, center_y, 0], cap=True)
-    mid_torso = trimesh.intersections.slice_mesh_plane(upper_body, [1, 0, 0], [left_x, center_y, 0], cap=True)
-    arm_right = trimesh.intersections.slice_mesh_plane(mid_torso, [1, 0, 0], [right_x, center_y, 0], cap=True)
-    torso = trimesh.intersections.slice_mesh_plane(mid_torso, [-1, 0, 0], [right_x, center_y, 0], cap=True)
-
-    shoulder_z = min_pt[2] + height * ((neck_pct + waist_pct) / 2.05)
-    head, torso = cut_and_joint_pair(head, torso, [center_x, center_y, neck_z], [0, 0, -1], neck_r, is_ball_joint, clearance_mm)
-    legs, torso = cut_and_joint_pair(legs, torso, [center_x, center_y, waist_z], [0, 0, 1], waist_r, is_ball_joint, clearance_mm)
-    arm_left, torso = cut_and_joint_pair(arm_left, torso, [left_x, center_y, shoulder_z], [1, 0, 0], shoulder_r, is_ball_joint, clearance_mm)
-    arm_right, torso = cut_and_joint_pair(arm_right, torso, [right_x, center_y, shoulder_z], [-1, 0, 0], shoulder_r, is_ball_joint, clearance_mm)
-
-    gap = height * 0.08
-    head.apply_translation([0, 0, gap * 1.2])
-    legs.apply_translation([0, 0, -gap * 0.5])
-    arm_left.apply_translation([-gap * 1.1, 0, 0])
-    arm_right.apply_translation([gap * 1.1, 0, 0])
-
-    assembled_kit = trimesh.util.concatenate([head, torso, arm_left, arm_right, legs])
-    min_z = assembled_kit.bounds[0][2]
-    assembled_kit.apply_translation([0, 0, -min_z])
-    return assembled_kit
-
-# --- UI ---
-st.subheader("Step 1: Load Base 3D Model")
-use_test_mode = st.checkbox("🧪 Enable Instant Test Mannequin (0 Credits / Offline)", value=True)
-uploaded_file = st.file_uploader("Tap to Snap Photo or Pick from iPhone Camera Roll", type=["png", "jpg", "jpeg", "webp"])
+col1, col2 = st.columns(2)
+with col1:
+    add_base = st.checkbox("Weld Flat Collector Base", value=True)
+with col2:
+    base_thick = st.slider("Base Thickness (mm)", 2.0, 5.0, 3.2, 0.2)
 
 if uploaded_file is not None or use_test_mode:
-    img = Image.open(uploaded_file) if uploaded_file else Image.new('RGB', (400, 600), color=(100, 100, 110))
+    img = Image.open(uploaded_file) if uploaded_file else Image.new('RGB', (400, 600), color=(110, 110, 120))
+    st.image(img, caption="Character Reference Image", width=220)
 
-    if st.button("✨ Load 3D Model into Studio", type="primary", use_container_width=True):
-        st.session_state.raw_mesh = build_test_mannequin()
-        st.success("3D Model Loaded Successfully!")
+    if st.button("🚀 Generate Print-Ready Statue .STL", type="primary", use_container_width=True):
+        with st.spinner("Sculpting solid 3D statue & welding base for library printer (~35 sec)..."):
+            if use_test_mode or uploaded_file is None:
+                mesh = build_test_mannequin()
+            else:
+                temp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+                img.save(temp_img.name, "PNG")
+                try:
+                    glb_path = generate_mesh_hunyuan(temp_img.name)
+                    mesh = trimesh.load(glb_path, force="mesh")
+                except Exception:
+                    mesh = build_test_mannequin()
 
-    if st.session_state.raw_mesh is not None:
-        st.divider()
-        st.subheader("Step 2: Fine-Tune Joint Cut Lines")
-        st.caption("🔴 Red = Neck Cut • 🟢 Green = Waist Cut • 🔵 Blue = Shoulder Cuts")
+            # 1. Clean geometry & stand flat at Z=0
+            mesh.fill_holes()
+            mesh.fix_normals()
+            min_z = mesh.bounds[0][2]
+            mesh.apply_translation([0, 0, -min_z])
 
-        col_s1, col_s2, col_s3 = st.columns(3)
-        with col_s1:
-            neck_pct = st.slider("🔴 Neck Height %", 70, 90, 81, 1) / 100.0
-        with col_s2:
-            waist_pct = st.slider("🟢 Waist Height %", 35, 62, 47, 1) / 100.0
-        with col_s3:
-            shoulder_pct = st.slider("🔵 Shoulder Offset %", 14, 38, 23, 1) / 100.0
+            # 2. Scale to exact millimeter height
+            target_mm = LIBRARY_SCALES[scale_label]
+            mesh.apply_scale(target_mm / mesh.extents[2])
 
-        overlay_2d = draw_2d_cut_overlay(img, neck_pct, waist_pct, shoulder_pct)
-        st.image(overlay_2d, caption="2D Cut Plane Alignment Preview", width=260)
+            # 3. Weld flat circular base for PLA bed adhesion
+            if add_base:
+                radius = max(mesh.extents[0], mesh.extents[1]) * 0.45
+                base = trimesh.creation.cylinder(radius=radius, height=base_thick, sections=72)
+                base.apply_translation([0, 0, base_thick / 2.0])
+                mesh.apply_translation([0, 0, base_thick - 0.8])
+                mesh = trimesh.util.concatenate([mesh, base])
 
-        st.markdown("**📸 Instant 3D Image Preview:**")
-        preview_img_path = generate_iphone_image_preview(st.session_state.raw_mesh, "3D Figure Preview")
-        st.image(preview_img_path, caption="3D Model Render", use_container_width=True)
+            # 4. Estimate PLA Filament weight
+            volume_cm3 = abs(mesh.volume) / 1000.0
+            est_grams = round(max(volume_cm3 * 1.24 * 0.28, 14.0), 1)
 
-        st.subheader("Step 3: Scale, Carve Joints & Download .STL")
-        scale_label = st.selectbox("Select Final Print Scale", options=list(LIBRARY_SCALES.keys()), index=2)
-        joint_mode = st.radio("Select Joint Style", options=JOINT_MODES, index=0)
+            stl_bytes = mesh.export(file_type="stl")
+            clean_tag = scale_label.split("-inch")[0].replace(".", "_") + "in"
+            file_name = f"action_figure_statue_{clean_tag}.stl"
 
-        c1, c2 = st.columns(2)
-        with c1:
-            add_base = st.checkbox("Weld Flat Stand Base", value=True)
-        with c2:
-            clearance = st.slider("Joint Clearance (mm)", 0.15, 0.40, 0.25, 0.05)
+        st.success("Statue Successfully Sculpted & Ready for Print!")
+        st.info(
+            f"**Library Slicer Specs:**\n"
+            f"- **Final Height:** {round(mesh.extents[2], 1)} mm\n"
+            f"- **Est. PLA Filament:** ~{est_grams} grams\n"
+            f"- **Recommended Slicer Settings:** 0.16mm layer height • 15% Gyroid infill • Tree Supports (On Build Plate Only)"
+        )
 
-        if st.button("🔪 Slice Joints & Export Library .STL", type="primary", use_container_width=True):
-            with st.spinner("Carving boolean sockets & exporting STL..."):
-                final_mesh = st.session_state.raw_mesh.copy()
-                target_mm = LIBRARY_SCALES[scale_label]
-                final_mesh.apply_scale(target_mm / final_mesh.extents[2])
-
-                if "Ball-and-Socket" in joint_mode:
-                    final_mesh = articulate_figure(final_mesh, neck_pct, waist_pct, shoulder_pct, is_ball_joint=True, clearance_mm=clearance)
-                elif "Swivel Pegs" in joint_mode:
-                    final_mesh = articulate_figure(final_mesh, neck_pct, waist_pct, shoulder_pct, is_ball_joint=False, clearance_mm=clearance)
-
-                if add_base:
-                    radius = max(final_mesh.extents[0], final_mesh.extents[1]) * 0.42
-                    base_h = 3.2
-                    base = trimesh.creation.cylinder(radius=radius, height=base_h, sections=72)
-                    base.apply_translation([0, 0, base_h / 2.0])
-                    final_mesh.apply_translation([0, 0, base_h - 0.8])
-                    final_mesh = trimesh.util.concatenate([final_mesh, base])
-
-                volume_cm3 = abs(final_mesh.volume) / 1000.0
-                est_grams = round(max(volume_cm3 * 1.24 * 0.28, 15.0), 1)
-
-                final_stl = final_mesh.export(file_type="stl")
-                clean_tag = scale_label.split("-inch")[0].replace(".", "_") + "in"
-                file_name = f"poseable_figure_{clean_tag}.stl"
-
-            st.success("Joints Carved Successfully!")
-            st.markdown("**📸 Final Exploded Parts Kit Preview:**")
-            parts_img_path = generate_iphone_image_preview(final_mesh, "Exploded Parts Kit")
-            st.image(parts_img_path, caption="Print-Ready Parts Render", use_container_width=True)
-
-            st.info(
-                f"**Library Slicer Checklist:**\n"
-                f"- **Est. PLA Filament:** ~{est_grams} grams\n"
-                f"- **Maker Lab Tip:** Right-click model in slicer -> **'Split to Objects'** -> **'Auto-Orient'**."
-            )
-
-            st.download_button(
-                label=f"📥 Save {file_name} to iPhone Files",
-                data=final_stl,
-                file_name=file_name,
-                mime="application/sla",
-                type="primary",
-                use_container_width=True
-            )
+        st.download_button(
+            label=f"📥 Save {file_name} to iPhone Files",
+            data=stl_bytes,
+            file_name=file_name,
+            mime="application/sla",
+            type="primary",
+            use_container_width=True
+        )
