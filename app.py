@@ -1,3 +1,4 @@
+import os
 import base64
 import tempfile
 import trimesh
@@ -10,7 +11,7 @@ from gradio_client import Client, handle_file
 st.set_page_config(page_title="Action Figure 3D Studio", page_icon="🦸", layout="centered")
 
 st.title("🦸 Action Figure 3D Studio")
-st.caption("iPhone-to-Library Edition • Live Cut-Line Calibration & Joint Builder")
+st.caption("iPhone-to-Library Edition • Real 3D AI Sculpt + Live Joint Calibration")
 
 LIBRARY_SCALES = {
     "3.75-inch Vintage Scale (95mm) | ~1.5 - 2.5 hrs": 95.25,
@@ -25,7 +26,6 @@ JOINT_MODES = [
     "Solid Statue (Single Uncut Piece)"
 ]
 
-# Initialize session state so moving sliders is instant and never re-runs the AI
 if "raw_mesh" not in st.session_state:
     st.session_state.raw_mesh = None
 if "engine_name" not in st.session_state:
@@ -40,295 +40,53 @@ def render_3d_preview_on_iphone(glb_bytes: bytes):
         src="data:model/gltf-binary;base64,{b64_glb}"
         alt="3D Action Figure Preview"
         camera-controls
+        auto-rotate
         shadow-intensity="1"
-        style="width: 100%; height: 390px; background-color: #1e1e24; border-radius: 12px;">
+        exposure="1.1"
+        style="width: 100%; height: 420px; background-color: #1e1e24; border-radius: 12px;">
     </model-viewer>
     """
-    components.html(html_code, height=405)
+    components.html(html_code, height=435)
 
-def draw_2d_cut_overlay(img: Image.Image, neck_pct: float, waist_pct: float, shoulder_pct: float) -> Image.Image:
-    """Draws color-coded cut guides directly over the 2D reference photo."""
-    preview = img.convert("RGB").copy()
-    draw = ImageDraw.Draw(preview)
-    w, h = preview.size
-    line_w = max(int(min(w, h) * 0.012), 3)
-
-    # Note: In 2D image coordinates, Y=0 is the top of the image
-    neck_y = int(h * (1.0 - neck_pct))
-    waist_y = int(h * (1.0 - waist_pct))
-    left_x = int(w * (0.5 - shoulder_pct))
-    right_x = int(w * (0.5 + shoulder_pct))
-
-    # Red = Neck Cut
-    draw.line([(0, neck_y), (w, neck_y)], fill=(255, 65, 65), width=line_w)
-    # Green = Waist Cut
-    draw.line([(0, waist_y), (w, waist_y)], fill=(45, 220, 90), width=line_w)
-    # Blue = Left & Right Shoulder Cuts (drawn between neck and waist)
-    draw.line([(left_x, neck_y), (left_x, waist_y)], fill=(65, 160, 255), width=line_w)
-    draw.line([(right_x, neck_y), (right_x, waist_y)], fill=(65, 160, 255), width=line_w)
-
-    return preview
-
-def build_3d_cut_guide_preview(mesh: trimesh.Trimesh, neck_pct: float, waist_pct: float, shoulder_pct: float) -> bytes:
-    """Builds a 3D scene with translucent laser-cut discs intersecting the figure."""
-    scene = trimesh.Scene()
-    body = mesh.copy()
-    body.visual.face_colors = [215, 215, 225, 255]
-    scene.add_geometry(body, node_name="figure")
-
-    bounds = body.bounds
-    min_pt, max_pt = bounds[0], bounds[1]
-    width = max_pt[0] - min_pt[0]
-    depth = max_pt[1] - min_pt[1]
-    height = max_pt[2] - min_pt[2]
-    cx = (min_pt[0] + max_pt[0]) / 2.0
-    cy = (min_pt[1] + max_pt[1]) / 2.0
-
-    neck_z = min_pt[2] + height * neck_pct
-    waist_z = min_pt[2] + height * waist_pct
-    shoulder_offset = width * shoulder_pct
-    shoulder_z = min_pt[2] + height * ((neck_pct + waist_pct) / 2.05)
-
-    # 1. Red Neck Cut Disc
-    neck_disc = trimesh.creation.cylinder(radius=max(width, depth) * 0.35, height=1.2, sections=48)
-    neck_disc.apply_translation([cx, cy, neck_z])
-    neck_disc.visual.face_colors = [255, 65, 65, 145]
-    scene.add_geometry(neck_disc, node_name="neck_cut")
-
-    # 2. Green Waist Cut Disc
-    waist_disc = trimesh.creation.cylinder(radius=max(width, depth) * 0.42, height=1.2, sections=48)
-    waist_disc.apply_translation([cx, cy, waist_z])
-    waist_disc.visual.face_colors = [45, 220, 90, 145]
-    scene.add_geometry(waist_disc, node_name="waist_cut")
-
-    # 3. Blue Left & Right Shoulder Cut Discs
-    sh_radius = height * 0.16
-    rot_y = trimesh.transformations.rotation_matrix(np.pi / 2.0, [0, 1, 0])
-    
-    for idx, x_pos in enumerate([cx - shoulder_offset, cx + shoulder_offset]):
-        sh_disc = trimesh.creation.cylinder(radius=sh_radius, height=1.2, sections=48)
-        sh_disc.apply_transform(rot_y)
-        sh_disc.apply_translation([x_pos, cy, shoulder_z])
-        sh_disc.visual.face_colors = [65, 160, 255, 145]
-        scene.add_geometry(sh_disc, node_name=f"shoulder_cut_{idx}")
-
-    return scene.export(file_type="glb")
-
-def generate_mesh_hunyuan(image_path: str) -> str:
-    """Calls Tencent Hunyuan3D-2 Space remotely for free 2D-to-3D generation."""
-    hf_token = st.secrets["HF_TOKEN"] if "HF_TOKEN" in st.secrets else None
-    client = Client("tencent/Hunyuan3D-2", hf_token=hf_token)
-    result = client.predict(
-        image=handle_file(image_path),
-        api_name="/shape_generation"
-    )
+def extract_glb_path(result) -> str:
+    """Safely extracts the file path from various Gradio Client return formats."""
+    if isinstance(result, str) and os.path.exists(result):
+        return result
+    if isinstance(result, dict):
+        for k in ["value", "path", "name", "mesh"]:
+            if k in result and isinstance(result[k], str) and os.path.exists(result[k]):
+                return result[k]
     if isinstance(result, (list, tuple)):
-        glb_file = result[0]
-        return glb_file["value"] if isinstance(glb_file, dict) and "value" in glb_file else glb_file
-    elif isinstance(result, dict) and "value" in result:
-        return result["value"]
-    return result
+        for item in result:
+            found = extract_glb_path(item)
+            if found:
+                return found
+    raise ValueError(f"Could not find 3D file path in API response: {result}")
 
-def build_fallback_mannequin() -> trimesh.Trimesh:
-    """Fallback humanoid figure in A-pose for instant slider and joint testing."""
-    torso = trimesh.creation.capsule(height=0.55, radius=0.16)
-    torso.apply_translation([0, 0, 0.78])
-    head = trimesh.creation.icosphere(radius=0.14)
-    head.apply_translation([0, 0, 1.28])
-    arm_l = trimesh.creation.capsule(height=0.45, radius=0.065)
-    arm_l.apply_translation([-0.26, 0, 0.80])
-    arm_r = trimesh.creation.capsule(height=0.45, radius=0.065)
-    arm_r.apply_translation([0.26, 0, 0.80])
-    leg_l = trimesh.creation.capsule(height=0.50, radius=0.075)
-    leg_l.apply_translation([-0.09, 0, 0.28])
-    leg_r = trimesh.creation.capsule(height=0.50, radius=0.075)
-    leg_r.apply_translation([0.09, 0, 0.28])
-    return trimesh.util.concatenate([torso, head, arm_l, arm_r, leg_l, leg_r])
+def generate_real_3d_mesh(image_path: str) -> tuple[str, str]:
+    """
+    Tries the top free Image-to-3D Spaces on Hugging Face with full parameter signatures.
+    Returns (glb_file_path, engine_used_label).
+    """
+    hf_token = st.secrets["HF_TOKEN"] if "HF_TOKEN" in st.secrets else None
+    errors = []
 
-def make_joint_geometry(center, axis_vec, radius, is_ball=True, clearance=0.0):
-    r = radius - clearance
-    stem_len = radius * 1.6
-    stem = trimesh.creation.cylinder(radius=r * 0.68, height=stem_len, sections=32)
-    rot = trimesh.geometry.align_vectors([0, 0, 1], axis_vec)
-    stem.apply_transform(rot)
-    stem.apply_translation(center + np.array(axis_vec) * (stem_len * 0.35))
-    if is_ball:
-        ball = trimesh.creation.icosphere(subdivisions=3, radius=r)
-        ball.apply_translation(center + np.array(axis_vec) * (stem_len * 0.75))
-        return trimesh.util.concatenate([stem, ball])
-    return stem
-
-def cut_and_joint_pair(mesh_a, mesh_b, joint_center, normal_into_b, joint_radius, is_ball, clearance_mm):
-    peg = make_joint_geometry(joint_center, normal_into_b, joint_radius, is_ball=is_ball, clearance=0.0)
-    socket_cutter = make_joint_geometry(joint_center, normal_into_b, joint_radius, is_ball=is_ball, clearance=-clearance_mm)
-    part_with_peg = trimesh.util.concatenate([mesh_a, peg])
-    try:
-        part_with_socket = trimesh.boolean.difference([mesh_b, socket_cutter], engine="manifold")
-        if part_with_socket is None or len(part_with_socket.faces) == 0:
-            part_with_socket = mesh_b
-    except Exception:
-        part_with_socket = mesh_b
-    return part_with_peg, part_with_socket
-
-def articulate_figure(mesh: trimesh.Trimesh, neck_pct: float, waist_pct: float, shoulder_pct: float, is_ball_joint: bool, clearance_mm: float = 0.25) -> trimesh.Trimesh:
-    """Slices figure at exact slider coordinates and carves snap-fit joints."""
-    bounds = mesh.bounds
-    min_pt, max_pt = bounds[0], bounds[1]
-    width = max_pt[0] - min_pt[0]
-    height = max_pt[2] - min_pt[2]
-    center_x = (min_pt[0] + max_pt[0]) / 2.0
-    center_y = (min_pt[1] + max_pt[1]) / 2.0
-
-    neck_z = min_pt[2] + height * neck_pct
-    waist_z = min_pt[2] + height * waist_pct
-    shoulder_offset_x = width * shoulder_pct
-
-    neck_r = max(height * 0.028, 2.8)
-    waist_r = max(height * 0.036, 3.5)
-    shoulder_r = max(height * 0.026, 2.6)
-
-    # 1. Slice Head vs Body
-    head = trimesh.intersections.slice_mesh_plane(mesh, [0, 0, 1], [center_x, center_y, neck_z], cap=True)
-    below_neck = trimesh.intersections.slice_mesh_plane(mesh, [0, 0, -1], [center_x, center_y, neck_z], cap=True)
-
-    # 2. Slice Upper Body vs Lower Body
-    upper_body = trimesh.intersections.slice_mesh_plane(below_neck, [0, 0, 1], [center_x, center_y, waist_z], cap=True)
-    legs = trimesh.intersections.slice_mesh_plane(below_neck, [0, 0, -1], [center_x, center_y, waist_z], cap=True)
-
-    # 3. Slice Left & Right Arms
-    left_x = center_x - shoulder_offset_x
-    right_x = center_x + shoulder_offset_x
-
-    arm_left = trimesh.intersections.slice_mesh_plane(upper_body, [-1, 0, 0], [left_x, center_y, 0], cap=True)
-    mid_torso = trimesh.intersections.slice_mesh_plane(upper_body, [1, 0, 0], [left_x, center_y, 0], cap=True)
-    arm_right = trimesh.intersections.slice_mesh_plane(mid_torso, [1, 0, 0], [right_x, center_y, 0], cap=True)
-    torso = trimesh.intersections.slice_mesh_plane(mid_torso, [-1, 0, 0], [right_x, center_y, 0], cap=True)
-
-    # 4. Carve Ball-and-Socket or Swivel Joints
-    shoulder_z = min_pt[2] + height * ((neck_pct + waist_pct) / 2.05)
-    head, torso = cut_and_joint_pair(head, torso, [center_x, center_y, neck_z], [0, 0, -1], neck_r, is_ball_joint, clearance_mm)
-    legs, torso = cut_and_joint_pair(legs, torso, [center_x, center_y, waist_z], [0, 0, 1], waist_r, is_ball_joint, clearance_mm)
-    arm_left, torso = cut_and_joint_pair(arm_left, torso, [left_x, center_y, shoulder_z], [1, 0, 0], shoulder_r, is_ball_joint, clearance_mm)
-    arm_right, torso = cut_and_joint_pair(arm_right, torso, [right_x, center_y, shoulder_z], [-1, 0, 0], shoulder_r, is_ball_joint, clearance_mm)
-
-    # 5. Explode parts slightly for inspection & single-file printing
-    gap = height * 0.08
-    head.apply_translation([0, 0, gap * 1.2])
-    legs.apply_translation([0, 0, -gap * 0.5])
-    arm_left.apply_translation([-gap * 1.1, 0, 0])
-    arm_right.apply_translation([gap * 1.1, 0, 0])
-
-    assembled_kit = trimesh.util.concatenate([head, torso, arm_left, arm_right, legs])
-    min_z = assembled_kit.bounds[0][2]
-    assembled_kit.apply_translation([0, 0, -min_z])
-    return assembled_kit
-
-# --- STEP 1: UPLOAD & GENERATE BASE 3D MESH ---
-st.subheader("Step 1: Upload Photo & Generate Base 3D Mesh")
-uploaded_file = st.file_uploader(
-    "Tap to Snap Photo or Pick from iPhone Camera Roll",
-    type=["png", "jpg", "jpeg", "webp"]
-)
-
-if uploaded_file is not None:
-    img = Image.open(uploaded_file)
-
-    if st.button("✨ Step 1: Generate 3D Base Model", type="primary", use_container_width=True):
-        with st.spinner("Generating base 3D figure in the cloud (~35 sec)..."):
-            temp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-            img.save(temp_img.name, "PNG")
-            try:
-                glb_path = generate_mesh_hunyuan(temp_img.name)
-                mesh = trimesh.load(glb_path, force="mesh")
-                st.session_state.engine_name = "Hunyuan3D-2 Cloud AI"
-            except Exception:
-                mesh = build_fallback_mannequin()
-                st.session_state.engine_name = "Test Mannequin (Free GPU queue busy — add HF_TOKEN in Secrets)"
-
-            mesh.fill_holes()
-            mesh.fix_normals()
-            min_z = mesh.bounds[0][2]
-            mesh.apply_translation([0, 0, -min_z])
-            # Normalize to 152.4mm (6-inch) baseline in cache
-            mesh.apply_scale(152.4 / mesh.extents[2])
-            st.session_state.raw_mesh = mesh
-
-    # --- STEP 2: FINE-TUNE CUT LINES & EXPORT STL ---
-    st.divider()
-    st.subheader("Step 2: Fine-Tune Joint Cut Lines")
-    st.caption("🔴 Red = Neck Cut • 🟢 Green = Waist Cut • 🔵 Blue = Shoulder Cuts")
-
-    col_s1, col_s2, col_s3 = st.columns(3)
-    with col_s1:
-        neck_pct = st.slider("🔴 Neck Height %", 70, 90, 81, 1) / 100.0
-    with col_s2:
-        waist_pct = st.slider("🟢 Waist Height %", 35, 62, 47, 1) / 100.0
-    with col_s3:
-        shoulder_pct = st.slider("🔵 Shoulder Offset %", 14, 38, 23, 1) / 100.0
-
-    # Show 2D Cut Line Overlay immediately
-    overlay_2d = draw_2d_cut_overlay(img, neck_pct, waist_pct, shoulder_pct)
-    st.image(overlay_2d, caption="2D Cut Plane Alignment Preview", width=260)
-
-    # If 3D model is generated, show live 3D laser rings on the model
-    if st.session_state.raw_mesh is not None:
-        st.markdown("**🔄 Live 3D Cut-Ring Preview (Drag to spin & verify joint placement):**")
-        guide_glb = build_3d_cut_guide_preview(st.session_state.raw_mesh, neck_pct, waist_pct, shoulder_pct)
-        render_3d_preview_on_iphone(guide_glb)
-
-        st.subheader("Step 3: Scale, Carve Joints & Download .STL")
-        scale_label = st.selectbox("Select Final Print Scale", options=list(LIBRARY_SCALES.keys()), index=2)
-        joint_mode = st.radio("Select Joint Style", options=JOINT_MODES, index=0)
-
-        c1, c2 = st.columns(2)
-        with c1:
-            add_base = st.checkbox("Weld Flat Stand Base", value=True)
-        with c2:
-            clearance = st.slider("Joint Clearance (mm)", 0.15, 0.40, 0.25, 0.05)
-
-        if st.button("🔪 Slice Joints & Export Library .STL", type="primary", use_container_width=True):
-            with st.spinner("Carving boolean sockets & exporting STL..."):
-                final_mesh = st.session_state.raw_mesh.copy()
-                target_mm = LIBRARY_SCALES[scale_label]
-                final_mesh.apply_scale(target_mm / final_mesh.extents[2])
-
-                if "Ball-and-Socket" in joint_mode:
-                    final_mesh = articulate_figure(final_mesh, neck_pct, waist_pct, shoulder_pct, is_ball_joint=True, clearance_mm=clearance)
-                elif "Swivel Pegs" in joint_mode:
-                    final_mesh = articulate_figure(final_mesh, neck_pct, waist_pct, shoulder_pct, is_ball_joint=False, clearance_mm=clearance)
-
-                if add_base:
-                    radius = max(final_mesh.extents[0], final_mesh.extents[1]) * 0.42
-                    base_h = 3.2
-                    base = trimesh.creation.cylinder(radius=radius, height=base_h, sections=72)
-                    base.apply_translation([0, 0, base_h / 2.0])
-                    final_mesh.apply_translation([0, 0, base_h - 0.8])
-                    final_mesh = trimesh.util.concatenate([final_mesh, base])
-
-                volume_cm3 = abs(final_mesh.volume) / 1000.0
-                est_grams = round(max(volume_cm3 * 1.24 * 0.28, 15.0), 1)
-
-                final_glb = final_mesh.export(file_type="glb")
-                final_stl = final_mesh.export(file_type="stl")
-                clean_tag = scale_label.split("-inch")[0].replace(".", "_") + "in"
-                file_name = f"poseable_figure_{clean_tag}.stl"
-
-            st.success(f"Joints Carved! ({st.session_state.engine_name})")
-            st.markdown("**🔄 Final Exploded Parts Kit (Zoom in to inspect ball pegs & sockets):**")
-            render_3d_preview_on_iphone(final_glb)
-
-            st.info(
-                f"**Library Slicer Checklist:**\n"
-                f"- **Cut Calibration:** Neck {int(neck_pct*100)}% • Waist {int(waist_pct*100)}% • Shoulders {int(shoulder_pct*100)}%\n"
-                f"- **Est. PLA Filament:** ~{est_grams} grams\n"
-                f"- **Maker Lab Tip:** Right-click model in slicer -> **'Split to Objects'** -> **'Auto-Orient'** so limbs print flat."
-            )
-
-            st.download_button(
-                label=f"📥 Save {file_name} to iPhone Files",
-                data=final_stl,
-                file_name=file_name,
-                mime="application/sla",
-                type="primary",
-                use_container_width=True
-            )
+    # 1. Try Tencent Hunyuan3D-2.1 / Hunyuan3D-2 (High-detail character sculpt)
+    for space_id in ["tencent/Hunyuan3D-2.1", "tencent/Hunyuan3D-2", "tencent/Hunyuan3D-2mv"]:
+        try:
+            client = Client(space_id, hf_token=hf_token)
+            for api_ep in ["/shape_generation", "/generation_all"]:
+                try:
+                    res = client.predict(
+                        caption="",
+                        image=handle_file(image_path),
+                        mv_image_front=None,
+                        mv_image_back=None,
+                        mv_image_left=None,
+                        mv_image_right=None,
+                        steps=30,
+                        guidance_scale=5.0,
+                        seed=1234,
+                        octree_resolution=256,
+                        check_box_rembg=True,
+                        num_
