@@ -1,3 +1,4 @@
+import os
 import tempfile
 import trimesh
 import numpy as np
@@ -20,7 +21,10 @@ LIBRARY_SCALES = {
 def generate_mesh_hunyuan(image_path: str) -> str:
     """Calls free Hugging Face Hunyuan3D-2 space remotely via gradio_client."""
     hf_token = st.secrets.get("HF_TOKEN", None) if "HF_TOKEN" in st.secrets else None
-    client = Client("tencent/Hunyuan3D-2", hf_token=hf_token)
+    if hf_token:
+        os.environ["HF_TOKEN"] = hf_token
+        
+    client = Client("tencent/Hunyuan3D-2")
     result = client.predict(
         image=handle_file(image_path),
         api_name="/shape_generation"
@@ -89,7 +93,7 @@ if uploaded_file is not None:
                     glb_path = generate_mesh_hunyuan(temp_img.name)
                     mesh = trimesh.load(glb_path, force="mesh")
                 except Exception as e:
-                    st.warning(f"Cloud AI queue busy ({e}). Loading fallback mannequin.")
+                    st.warning(f"Cloud AI queue busy or error ({e}). Loading fallback mannequin.")
                     mesh = build_test_mannequin()
 
             # 1. Clean geometry & stand flat at Z=0
