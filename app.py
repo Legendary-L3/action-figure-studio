@@ -6,12 +6,12 @@ import numpy as np
 import streamlit as st
 import streamlit.components.v1 as components
 from PIL import Image, ImageDraw
-import requests
+from gradio_client import Client, handle_file
 
 st.set_page_config(page_title="Action Figure 3D Studio", page_icon="🦸", layout="centered")
 
 st.title("🦸 Action Figure 3D Studio")
-st.caption("iPhone-to-Library Edition • Tripo AI & Live Joint Builder")
+st.caption("iPhone-to-Library Edition • 100% Free Hugging Face AI & Joint Builder")
 
 LIBRARY_SCALES = {
     "3.75-inch Vintage Scale (95mm) | ~1.5 - 2.5 hrs": 95.25,
@@ -100,67 +100,42 @@ def build_3d_cut_guide_preview(mesh: trimesh.Trimesh, neck_pct: float, waist_pct
 
     return scene.export(file_type="glb")
 
-def generate_mesh_tripo(image_path: str) -> str:
-    """Uses correct Tripo API endpoint paths with your `tsk_` secret key."""
-    api_key = st.secrets.get("TRIPO_API_KEY", "")
-    if not api_key:
-        raise ValueError("❌ TRIPO_API_KEY is missing in Streamlit Secrets.")
+def generate_mesh_hunyuan(image_path: str) -> str:
+    """Calls free Hugging Face Hunyuan3D-2 space remotely via gradio_client."""
+    hf_token = st.secrets.get("HF_TOKEN", None) if "HF_TOKEN" in st.secrets else None
+    client = Client("tencent/Hunyuan3D-2", hf_token=hf_token)
+    result = client.predict(
+        image=handle_file(image_path),
+        api_name="/shape_generation"
+    )
+    if isinstance(result, (list, tuple)):
+        glb_file = result[0]
+        return glb_file["value"] if isinstance(glb_file, dict) and "value" in glb_file else glb_file
+    elif isinstance(result, dict) and "value" in result:
+        return result["value"]
+    return result
 
-    headers = {"Authorization": f"Bearer {api_key}"}
-    
-    # 1. Upload image endpoint
-    with open(image_path, "rb") as f:
-        upload_res = requests.post(
-            "https://api.tripo3d.ai/v2/openapi/upload",
-            headers=headers,
-            files={"file": f}
-        ).json()
-    
-    if "data" not in upload_res or "image_token" not in upload_res["data"]:
-        raise RuntimeError(f"Tripo Upload Error: {upload_res}")
-        
-    image_token = upload_res["data"]["image_token"]
-
-    # 2. Trigger task endpoint
-    task_res = requests.post(
-        "https://api.tripo3d.ai/v2/openapi/task",
-        headers={**headers, "Content-Type": "application/json"},
-        json={
-            "type": "image_to_model",
-            "file": {"type": "jpg", "file_token": image_token}
-        }
-    ).json()
-    
-    if "data" not in task_res or "task_id" not in task_res["data"]:
-        raise RuntimeError(f"Tripo Task Error: {task_res}")
-        
-    task_id = task_res["data"]["task_id"]
-
-    # 3. Poll task status until complete (~30 sec)
-    while True:
-        status_res = requests.get(
-            f"https://api.tripo3d.ai/v2/openapi/task/{task_id}",
-            headers=headers
-        ).json()
-        
-        if "data" not in status_res:
-            raise RuntimeError(f"Tripo Polling Error: {status_res}")
-            
-        data = status_res["data"]
-        status = data.get("status")
-        
-        if status == "success":
-            glb_url = data["output"]["model"]
-            break
-        elif status in ["failed", "cancelled"]:
-            raise RuntimeError(f"Tripo generation failed: {status_res}")
-        time.sleep(3)
-
-    glb_data = requests.get(glb_url).content
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".glb")
-    tmp.write(glb_data)
-    tmp.close()
-    return tmp.name
+def build_test_mannequin() -> trimesh.Trimesh:
+    """Offline backup mannequin for instant slider and joint testing."""
+    torso = trimesh.creation.capsule(height=0.55, radius=0.16)
+    torso.apply_translation([0, 0, 0.78])
+    head = trimesh.creation.icosphere(radius=0.14)
+    head.apply_translation([0, 0, 1.28])
+    arm_l = trimesh.creation.capsule(height=0.45, radius=0.065)
+    arm_l.apply_translation([-0.26, 0, 0.80])
+    arm_r = trimesh.creation.capsule(height=0.45, radius=0.065)
+    arm_r.apply_translation([0.26, 0, 0.80])
+    leg_l = trimesh.creation.capsule(height=0.50, radius=0.075)
+    leg_l.apply_translation([-0.09, 0, 0.28])
+    leg_r = trimesh.creation.capsule(height=0.50, radius=0.075)
+    leg_r.apply_translation([0.09, 0, 0.28])
+    mesh = trimesh.util.concatenate([torso, head, arm_l, arm_r, leg_l, leg_r])
+    mesh.fill_holes()
+    mesh.fix_normals()
+    min_z = mesh.bounds[0][2]
+    mesh.apply_translation([0, 0, -min_z])
+    mesh.apply_scale(152.4 / mesh.extents[2])
+    return mesh
 
 def make_joint_geometry(center, axis_vec, radius, is_ball=True, clearance=0.0):
     r = radius - clearance
@@ -235,27 +210,33 @@ def articulate_figure(mesh: trimesh.Trimesh, neck_pct: float, waist_pct: float, 
 
 # --- UI ---
 st.subheader("Step 1: Upload Photo & Generate Base 3D Mesh")
+use_test_mode = st.checkbox("🧪 Enable Offline Test Mode (0-Credit Test Mannequin)", value=False)
 uploaded_file = st.file_uploader("Tap to Snap Photo or Pick from iPhone Camera Roll", type=["png", "jpg", "jpeg", "webp"])
 
-if uploaded_file is not None:
-    img = Image.open(uploaded_file)
+if uploaded_file is not None or use_test_mode:
+    img = Image.open(uploaded_file) if uploaded_file else Image.new('RGB', (400, 600), color=(100, 100, 110))
 
-    if st.button("✨ Step 1: Generate Character 3D Model", type="primary", use_container_width=True):
-        with st.spinner("Tripo AI is sculpting your 2D photo into 3D (~30 sec)..."):
-            temp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-            img.save(temp_img.name, "PNG")
-            try:
-                glb_path = generate_mesh_tripo(temp_img.name)
-                mesh = trimesh.load(glb_path, force="mesh")
-                mesh.fill_holes()
-                mesh.fix_normals()
-                min_z = mesh.bounds[0][2]
-                mesh.apply_translation([0, 0, -min_z])
-                mesh.apply_scale(152.4 / mesh.extents[2])
-                st.session_state.raw_mesh = mesh
-                st.success("3D Character Model Generated Successfully!")
-            except Exception as e:
-                st.error(f"{e}")
+    if st.button("✨ Step 1: Generate Character 3D Model (Hugging Face AI)", type="primary", use_container_width=True):
+        if use_test_mode:
+            st.session_state.raw_mesh = build_test_mannequin()
+            st.success("Test Mannequin Loaded Successfully!")
+        else:
+            with st.spinner("Hugging Face ZeroGPU is sculpting your 2D photo into 3D (~35 sec)..."):
+                temp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+                img.save(temp_img.name, "PNG")
+                try:
+                    glb_path = generate_mesh_hunyuan(temp_img.name)
+                    mesh = trimesh.load(glb_path, force="mesh")
+                    mesh.fill_holes()
+                    mesh.fix_normals()
+                    min_z = mesh.bounds[0][2]
+                    mesh.apply_translation([0, 0, -min_z])
+                    mesh.apply_scale(152.4 / mesh.extents[2])
+                    st.session_state.raw_mesh = mesh
+                    st.success("3D Character Model Generated Successfully!")
+                except Exception as e:
+                    st.warning(f"Cloud queue busy ({e}). Falling back to test mannequin so you can keep working.")
+                    st.session_state.raw_mesh = build_test_mannequin()
 
     if st.session_state.raw_mesh is not None:
         st.divider()
