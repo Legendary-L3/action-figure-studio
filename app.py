@@ -102,10 +102,10 @@ def build_3d_cut_guide_preview(mesh: trimesh.Trimesh, neck_pct: float, waist_pct
     return scene.export(file_type="glb")
 
 def generate_mesh_tripo(image_path: str) -> str:
-    """Calls Tripo3D Cloud API for reliable, high-detail character generation."""
+    """Calls Tripo3D Cloud API with safe error handling."""
     api_key = st.secrets.get("TRIPO_API_KEY", "")
     if not api_key:
-        raise ValueError("Missing TRIPO_API_KEY in Streamlit Secrets.")
+        raise ValueError("❌ TRIPO_API_KEY is missing! Add it in Streamlit Cloud Dashboard -> Settings -> Secrets.")
 
     headers = {"Authorization": f"Bearer {api_key}"}
     
@@ -116,6 +116,10 @@ def generate_mesh_tripo(image_path: str) -> str:
             headers=headers,
             files={"file": f}
         ).json()
+    
+    if "data" not in upload_res or "image_token" not in upload_res["data"]:
+        raise RuntimeError(f"Tripo Upload Error Response: {upload_res}")
+        
     image_token = upload_res["data"]["image_token"]
 
     # 2. Trigger task
@@ -124,6 +128,10 @@ def generate_mesh_tripo(image_path: str) -> str:
         headers={**headers, "Content-Type": "application/json"},
         json={"type": "image_to_model", "file": {"type": "jpg", "file_token": image_token}}
     ).json()
+    
+    if "data" not in task_res or "task_id" not in task_res["data"]:
+        raise RuntimeError(f"Tripo Task Creation Error Response: {task_res}")
+        
     task_id = task_res["data"]["task_id"]
 
     # 3. Poll until complete (~30 sec)
@@ -132,15 +140,18 @@ def generate_mesh_tripo(image_path: str) -> str:
             f"https://api.tripo3d.ai/v2/openapi/task/{task_id}",
             headers=headers
         ).json()
+        
+        if "data" not in status_res:
+            raise RuntimeError(f"Tripo Polling Error Response: {status_res}")
+            
         status = status_res["data"]["status"]
         if status == "success":
             glb_url = status_res["data"]["output"]["model"]
             break
         elif status in ["failed", "cancelled"]:
-            raise RuntimeError("Tripo3D generation failed. Ensure your photo is a clear, full-body character shot.")
+            raise RuntimeError(f"Tripo generation failed: {status_res}")
         time.sleep(3)
 
-    # Download resulting GLB
     glb_data = requests.get(glb_url).content
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".glb")
     tmp.write(glb_data)
@@ -240,7 +251,7 @@ if uploaded_file is not None:
                 st.session_state.raw_mesh = mesh
                 st.success("3D Character Model Generated Successfully!")
             except Exception as e:
-                st.error(f"Generation error: {e}")
+                st.error(f"{e}")
 
     if st.session_state.raw_mesh is not None:
         st.divider()
