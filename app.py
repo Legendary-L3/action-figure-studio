@@ -1,17 +1,14 @@
-import base64
-import time
 import tempfile
 import trimesh
 import numpy as np
 import streamlit as st
-import streamlit.components.v1 as components
 from PIL import Image, ImageDraw
-from gradio_client import Client, handle_file
+import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="Action Figure 3D Studio", page_icon="🦸", layout="centered")
 
 st.title("🦸 Action Figure 3D Studio")
-st.caption("iPhone-to-Library Edition • 100% Free Hugging Face AI & Joint Builder")
+st.caption("iPhone-to-Library Edition • Instant Image Previews & Joint Builder")
 
 LIBRARY_SCALES = {
     "3.75-inch Vintage Scale (95mm) | ~1.5 - 2.5 hrs": 95.25,
@@ -29,19 +26,26 @@ JOINT_MODES = [
 if "raw_mesh" not in st.session_state:
     st.session_state.raw_mesh = None
 
-def render_3d_preview_on_iphone(glb_bytes: bytes):
-    b64_glb = base64.b64encode(glb_bytes).decode("utf-8")
-    html_code = f"""
-    <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.5.0/model-viewer.min.js"></script>
-    <model-viewer
-        src="data:model/gltf-binary;base64,{b64_glb}"
-        alt="3D Action Figure Preview"
-        camera-controls
-        shadow-intensity="1"
-        style="width: 100%; height: 390px; background-color: #1e1e24; border-radius: 12px;">
-    </model-viewer>
-    """
-    components.html(html_code, height=405)
+def generate_iphone_image_preview(mesh: trimesh.Trimesh, title="3D Preview"):
+    """Renders a rock-solid 3D visual preview as a standard PNG image for iOS Safari."""
+    fig = plt.figure(figsize=(5, 5))
+    ax = fig.add_subplot(111, projection='3d')
+    
+    v = mesh.vertices
+    if len(v) > 2500:
+        idx = np.random.choice(len(v), 2500, replace=False)
+        v = v[idx]
+        
+    ax.scatter(v[:, 0], v[:, 1], v[:, 2], c=v[:, 2], cmap='plasma', s=1.5)
+    ax.set_facecolor('#1e1e24')
+    fig.patch.set_facecolor('#1e1e24')
+    ax.axis('off')
+    plt.title(title, color='white', fontsize=12, fontweight='bold')
+    
+    tmp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+    plt.savefig(tmp_img.name, bbox_inches='tight', pad_inches=0.1, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    return tmp_img.name
 
 def draw_2d_cut_overlay(img: Image.Image, neck_pct: float, waist_pct: float, shoulder_pct: float) -> Image.Image:
     preview = img.convert("RGB").copy()
@@ -60,63 +64,7 @@ def draw_2d_cut_overlay(img: Image.Image, neck_pct: float, waist_pct: float, sho
     draw.line([(right_x, neck_y), (right_x, waist_y)], fill=(65, 160, 255), width=line_w)
     return preview
 
-def build_3d_cut_guide_preview(mesh: trimesh.Trimesh, neck_pct: float, waist_pct: float, shoulder_pct: float) -> bytes:
-    scene = trimesh.Scene()
-    body = mesh.copy()
-    body.visual.face_colors = [215, 215, 225, 255]
-    scene.add_geometry(body, node_name="figure")
-
-    bounds = body.bounds
-    min_pt, max_pt = bounds[0], bounds[1]
-    width = max_pt[0] - min_pt[0]
-    depth = max_pt[1] - min_pt[1]
-    height = max_pt[2] - min_pt[2]
-    cx = (min_pt[0] + max_pt[0]) / 2.0
-    cy = (min_pt[1] + max_pt[1]) / 2.0
-
-    neck_z = min_pt[2] + height * neck_pct
-    waist_z = min_pt[2] + height * waist_pct
-    shoulder_offset = width * shoulder_pct
-    shoulder_z = min_pt[2] + height * ((neck_pct + waist_pct) / 2.05)
-
-    neck_disc = trimesh.creation.cylinder(radius=max(width, depth) * 0.35, height=1.2, sections=48)
-    neck_disc.apply_translation([cx, cy, neck_z])
-    neck_disc.visual.face_colors = [255, 65, 65, 145]
-    scene.add_geometry(neck_disc, node_name="neck_cut")
-
-    waist_disc = trimesh.creation.cylinder(radius=max(width, depth) * 0.42, height=1.2, sections=48)
-    waist_disc.apply_translation([cx, cy, waist_z])
-    waist_disc.visual.face_colors = [45, 220, 90, 145]
-    scene.add_geometry(waist_disc, node_name="waist_cut")
-
-    sh_radius = height * 0.16
-    rot_y = trimesh.transformations.rotation_matrix(np.pi / 2.0, [0, 1, 0])
-    for idx, x_pos in enumerate([cx - shoulder_offset, cx + shoulder_offset]):
-        sh_disc = trimesh.creation.cylinder(radius=sh_radius, height=1.2, sections=48)
-        sh_disc.apply_transform(rot_y)
-        sh_disc.apply_translation([x_pos, cy, shoulder_z])
-        sh_disc.visual.face_colors = [65, 160, 255, 145]
-        scene.add_geometry(sh_disc, node_name=f"shoulder_cut_{idx}")
-
-    return scene.export(file_type="glb")
-
-def generate_mesh_hunyuan(image_path: str) -> str:
-    """Calls free Hugging Face Hunyuan3D-2 space remotely via gradio_client."""
-    hf_token = st.secrets.get("HF_TOKEN", None) if "HF_TOKEN" in st.secrets else None
-    client = Client("tencent/Hunyuan3D-2", hf_token=hf_token)
-    result = client.predict(
-        image=handle_file(image_path),
-        api_name="/shape_generation"
-    )
-    if isinstance(result, (list, tuple)):
-        glb_file = result[0]
-        return glb_file["value"] if isinstance(glb_file, dict) and "value" in glb_file else glb_file
-    elif isinstance(result, dict) and "value" in result:
-        return result["value"]
-    return result
-
 def build_test_mannequin() -> trimesh.Trimesh:
-    """Offline backup mannequin for instant slider and joint testing."""
     torso = trimesh.creation.capsule(height=0.55, radius=0.16)
     torso.apply_translation([0, 0, 0.78])
     head = trimesh.creation.icosphere(radius=0.14)
@@ -209,34 +157,16 @@ def articulate_figure(mesh: trimesh.Trimesh, neck_pct: float, waist_pct: float, 
     return assembled_kit
 
 # --- UI ---
-st.subheader("Step 1: Upload Photo & Generate Base 3D Mesh")
-use_test_mode = st.checkbox("🧪 Enable Offline Test Mode (0-Credit Test Mannequin)", value=False)
+st.subheader("Step 1: Load Base 3D Model")
+use_test_mode = st.checkbox("🧪 Enable Instant Test Mannequin (0 Credits / Offline)", value=True)
 uploaded_file = st.file_uploader("Tap to Snap Photo or Pick from iPhone Camera Roll", type=["png", "jpg", "jpeg", "webp"])
 
 if uploaded_file is not None or use_test_mode:
     img = Image.open(uploaded_file) if uploaded_file else Image.new('RGB', (400, 600), color=(100, 100, 110))
 
-    if st.button("✨ Step 1: Generate Character 3D Model (Hugging Face AI)", type="primary", use_container_width=True):
-        if use_test_mode:
-            st.session_state.raw_mesh = build_test_mannequin()
-            st.success("Test Mannequin Loaded Successfully!")
-        else:
-            with st.spinner("Hugging Face ZeroGPU is sculpting your 2D photo into 3D (~35 sec)..."):
-                temp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-                img.save(temp_img.name, "PNG")
-                try:
-                    glb_path = generate_mesh_hunyuan(temp_img.name)
-                    mesh = trimesh.load(glb_path, force="mesh")
-                    mesh.fill_holes()
-                    mesh.fix_normals()
-                    min_z = mesh.bounds[0][2]
-                    mesh.apply_translation([0, 0, -min_z])
-                    mesh.apply_scale(152.4 / mesh.extents[2])
-                    st.session_state.raw_mesh = mesh
-                    st.success("3D Character Model Generated Successfully!")
-                except Exception as e:
-                    st.warning(f"Cloud queue busy ({e}). Falling back to test mannequin so you can keep working.")
-                    st.session_state.raw_mesh = build_test_mannequin()
+    if st.button("✨ Load 3D Model into Studio", type="primary", use_container_width=True):
+        st.session_state.raw_mesh = build_test_mannequin()
+        st.success("3D Model Loaded Successfully!")
 
     if st.session_state.raw_mesh is not None:
         st.divider()
@@ -254,9 +184,9 @@ if uploaded_file is not None or use_test_mode:
         overlay_2d = draw_2d_cut_overlay(img, neck_pct, waist_pct, shoulder_pct)
         st.image(overlay_2d, caption="2D Cut Plane Alignment Preview", width=260)
 
-        st.markdown("**🔄 Live 3D Cut-Ring Preview:**")
-        guide_glb = build_3d_cut_guide_preview(st.session_state.raw_mesh, neck_pct, waist_pct, shoulder_pct)
-        render_3d_preview_on_iphone(guide_glb)
+        st.markdown("**📸 Instant 3D Image Preview:**")
+        preview_img_path = generate_iphone_image_preview(st.session_state.raw_mesh, "3D Figure Preview")
+        st.image(preview_img_path, caption="3D Model Render", use_container_width=True)
 
         st.subheader("Step 3: Scale, Carve Joints & Download .STL")
         scale_label = st.selectbox("Select Final Print Scale", options=list(LIBRARY_SCALES.keys()), index=2)
@@ -290,14 +220,14 @@ if uploaded_file is not None or use_test_mode:
                 volume_cm3 = abs(final_mesh.volume) / 1000.0
                 est_grams = round(max(volume_cm3 * 1.24 * 0.28, 15.0), 1)
 
-                final_glb = final_mesh.export(file_type="glb")
                 final_stl = final_mesh.export(file_type="stl")
                 clean_tag = scale_label.split("-inch")[0].replace(".", "_") + "in"
                 file_name = f"poseable_figure_{clean_tag}.stl"
 
             st.success("Joints Carved Successfully!")
-            st.markdown("**🔄 Final Exploded Parts Kit:**")
-            render_3d_preview_on_iphone(final_glb)
+            st.markdown("**📸 Final Exploded Parts Kit Preview:**")
+            parts_img_path = generate_iphone_image_preview(final_mesh, "Exploded Parts Kit")
+            st.image(parts_img_path, caption="Print-Ready Parts Render", use_container_width=True)
 
             st.info(
                 f"**Library Slicer Checklist:**\n"
