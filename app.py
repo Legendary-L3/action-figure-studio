@@ -8,7 +8,7 @@ from gradio_client import Client, handle_file
 st.set_page_config(page_title="Action Figure Statue Studio", page_icon="🗿", layout="centered")
 
 st.title("🗿 Action Figure Statue Studio")
-st.caption("iPhone-to-Library Edition • Clean Solid Statues & Collector Bases")
+st.caption("iPhone-to-Library Edition • Live Photo-to-3D Statue Studio")
 
 LIBRARY_SCALES = {
     "3.75-inch Vintage Scale (95mm) | ~1.5 - 2.5 hrs": 95.25,
@@ -33,7 +33,7 @@ def generate_mesh_hunyuan(image_path: str) -> str:
     return result
 
 def build_test_mannequin() -> trimesh.Trimesh:
-    """Offline test character for instant statue and scaling checks."""
+    """Offline backup mannequin if cloud queue is busy."""
     torso = trimesh.creation.capsule(height=0.55, radius=0.16)
     torso.apply_translation([0, 0, 0.78])
     head = trimesh.creation.icosphere(radius=0.14)
@@ -60,7 +60,7 @@ uploaded_file = st.file_uploader(
     type=["png", "jpg", "jpeg", "webp"]
 )
 
-use_test_mode = st.checkbox("🧪 Enable Instant Test Mannequin (0-Credit Offline Mode)", value=False)
+use_test_mode = st.checkbox("🧪 Fallback to Test Mannequin (Only if cloud queue is busy)", value=False)
 
 scale_label = st.selectbox(
     "2. Choose Library-Friendly Statue Scale",
@@ -74,21 +74,22 @@ with col1:
 with col2:
     base_thick = st.slider("Base Thickness (mm)", 2.0, 5.0, 3.2, 0.2)
 
-if uploaded_file is not None or use_test_mode:
-    img = Image.open(uploaded_file) if uploaded_file else Image.new('RGB', (400, 600), color=(110, 110, 120))
-    st.image(img, caption="Character Reference Image", width=220)
+if uploaded_file is not None:
+    img = Image.open(uploaded_file)
+    st.image(img, caption="Uploaded Character Photo", width=220)
 
-    if st.button("🚀 Generate Print-Ready Statue .STL", type="primary", use_container_width=True):
-        with st.spinner("Sculpting solid 3D statue & welding base for library printer (~35 sec)..."):
-            if use_test_mode or uploaded_file is None:
+    if st.button("🚀 Sculpt 3D Statue from Photo", type="primary", use_container_width=True):
+        with st.spinner("AI is converting your photo into a 3D character mesh (~35-45 sec)..."):
+            if use_test_mode:
                 mesh = build_test_mannequin()
             else:
-                temp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-                img.save(temp_img.name, "PNG")
                 try:
+                    temp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+                    img.save(temp_img.name, "PNG")
                     glb_path = generate_mesh_hunyuan(temp_img.name)
                     mesh = trimesh.load(glb_path, force="mesh")
-                except Exception:
+                except Exception as e:
+                    st.warning(f"Cloud AI queue busy ({e}). Loading fallback mannequin.")
                     mesh = build_test_mannequin()
 
             # 1. Clean geometry & stand flat at Z=0
@@ -115,9 +116,9 @@ if uploaded_file is not None or use_test_mode:
 
             stl_bytes = mesh.export(file_type="stl")
             clean_tag = scale_label.split("-inch")[0].replace(".", "_") + "in"
-            file_name = f"action_figure_statue_{clean_tag}.stl"
+            file_name = f"character_statue_{clean_tag}.stl"
 
-        st.success("Statue Successfully Sculpted & Ready for Print!")
+        st.success("Statue Sculpted from Your Photo!")
         st.info(
             f"**Library Slicer Specs:**\n"
             f"- **Final Height:** {round(mesh.extents[2], 1)} mm\n"
