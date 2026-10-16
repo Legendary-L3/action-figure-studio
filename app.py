@@ -1,5 +1,4 @@
 import base64
-import os
 import time
 import tempfile
 import trimesh
@@ -12,7 +11,7 @@ import requests
 st.set_page_config(page_title="Action Figure 3D Studio", page_icon="🦸", layout="centered")
 
 st.title("🦸 Action Figure 3D Studio")
-st.caption("iPhone-to-Library Edition • Tripo3D Cloud AI & Live Joint Builder")
+st.caption("iPhone-to-Library Edition • Tripo V3 AI & Live Joint Builder")
 
 LIBRARY_SCALES = {
     "3.75-inch Vintage Scale (95mm) | ~1.5 - 2.5 hrs": 95.25,
@@ -101,55 +100,60 @@ def build_3d_cut_guide_preview(mesh: trimesh.Trimesh, neck_pct: float, waist_pct
 
     return scene.export(file_type="glb")
 
-def generate_mesh_tripo(image_path: str) -> str:
-    """Calls Tripo3D Cloud API with safe error handling."""
+def generate_mesh_tripo_v3(image_path: str) -> str:
+    """Calls official Tripo V3 API endpoints (`/v3/openapi/...`)."""
     api_key = st.secrets.get("TRIPO_API_KEY", "")
     if not api_key:
-        raise ValueError("❌ TRIPO_API_KEY is missing! Add it in Streamlit Cloud Dashboard -> Settings -> Secrets.")
+        raise ValueError("❌ TRIPO_API_KEY is missing in Streamlit Secrets.")
 
     headers = {"Authorization": f"Bearer {api_key}"}
     
-    # 1. Upload image token
+    # 1. Upload image using V3 endpoint
     with open(image_path, "rb") as f:
         upload_res = requests.post(
-            "https://api.tripo3d.ai/v2/openapi/upload",
+            "https://openapi.tripo3d.ai/v3/openapi/upload",
             headers=headers,
             files={"file": f}
         ).json()
     
     if "data" not in upload_res or "image_token" not in upload_res["data"]:
-        raise RuntimeError(f"Tripo Upload Error Response: {upload_res}")
+        raise RuntimeError(f"Tripo V3 Upload Error: {upload_res}")
         
     image_token = upload_res["data"]["image_token"]
 
-    # 2. Trigger task
+    # 2. Trigger V3 task (Image to Model)
     task_res = requests.post(
-        "https://api.tripo3d.ai/v2/openapi/task",
+        "https://openapi.tripo3d.ai/v3/openapi/task",
         headers={**headers, "Content-Type": "application/json"},
-        json={"type": "image_to_model", "file": {"type": "jpg", "file_token": image_token}}
+        json={
+            "type": "image_to_model",
+            "file": {"type": "jpg", "file_token": image_token}
+        }
     ).json()
     
     if "data" not in task_res or "task_id" not in task_res["data"]:
-        raise RuntimeError(f"Tripo Task Creation Error Response: {task_res}")
+        raise RuntimeError(f"Tripo V3 Task Error: {task_res}")
         
     task_id = task_res["data"]["task_id"]
 
-    # 3. Poll until complete (~30 sec)
+    # 3. Poll V3 task status until complete (~30 sec)
     while True:
         status_res = requests.get(
-            f"https://api.tripo3d.ai/v2/openapi/task/{task_id}",
+            f"https://openapi.tripo3d.ai/v3/openapi/task/{task_id}",
             headers=headers
         ).json()
         
         if "data" not in status_res:
-            raise RuntimeError(f"Tripo Polling Error Response: {status_res}")
+            raise RuntimeError(f"Tripo V3 Polling Error: {status_res}")
             
-        status = status_res["data"]["status"]
+        data = status_res["data"]
+        status = data.get("status")
+        
         if status == "success":
-            glb_url = status_res["data"]["output"]["model"]
+            glb_url = data["output"]["model"]
             break
         elif status in ["failed", "cancelled"]:
-            raise RuntimeError(f"Tripo generation failed: {status_res}")
+            raise RuntimeError(f"Tripo V3 generation failed: {status_res}")
         time.sleep(3)
 
     glb_data = requests.get(glb_url).content
@@ -236,12 +240,12 @@ uploaded_file = st.file_uploader("Tap to Snap Photo or Pick from iPhone Camera R
 if uploaded_file is not None:
     img = Image.open(uploaded_file)
 
-    if st.button("✨ Step 1: Generate Character 3D Model", type="primary", use_container_width=True):
-        with st.spinner("Tripo3D AI is sculpting your 2D photo into 3D (~30 sec)..."):
+    if st.button("✨ Step 1: Generate Character 3D Model (Tripo V3)", type="primary", use_container_width=True):
+        with st.spinner("Tripo V3 AI is sculpting your 2D photo into 3D (~30 sec)..."):
             temp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
             img.save(temp_img.name, "PNG")
             try:
-                glb_path = generate_mesh_tripo(temp_img.name)
+                glb_path = generate_mesh_tripo_v3(temp_img.name)
                 mesh = trimesh.load(glb_path, force="mesh")
                 mesh.fill_holes()
                 mesh.fix_normals()
